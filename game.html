@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Shooter Táctico: Enemigo Escopeta</title>
+    <style>
+        body {
+            background-color: #0d0d0d;
+            color: #eee;
+            font-family: 'Courier New', Courier, monospace;
+            margin: 0;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            background-color: #1a1a1a;
+            cursor: crosshair;
+        }
+        .ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            text-align: center;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 15px 30px;
+            border-radius: 12px;
+            border: 1px solid #444;
+            pointer-events: none;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 4px;
+            background: #333;
+            margin-bottom: 8px;
+            font-weight: bold;
+            font-size: 1.2em;
+            letter-spacing: 1px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="ui-layer">
+        <div class="status-badge" id="statusText">ZONA SEGURA</div>
+        <div style="font-size: 0.9em; color: #aaa;">
+            WASD: Mover | CLICK: Disparar | <span style="color:#ff4444">Rojos: Rifle</span> | <span style="color:#FF5722">Naranjas: Escopeta</span><br>
+            Recupera tu bala para disparar de nuevo.
+        </div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusText = document.getElementById('statusText');
+
+    const WORLD_WIDTH = 2500;
+    const WORLD_HEIGHT = 2000;
+
+    function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    const gameState = { gameOver: false };
+    const camera = { x: 0, y: 0 };
+
+    const keys = { w: false, a: false, s: false, d: false };
+    const mouseScreen = { x: 0, y: 0 };
+    const mouseWorld = { x: 0, y: 0 };
+
+    document.addEventListener('keydown', (e) => { if (keys.hasOwnProperty(e.key.toLowerCase())) keys[e.key.toLowerCase()] = true; });
+    document.addEventListener('keyup', (e) => { if (keys.hasOwnProperty(e.key.toLowerCase())) keys[e.key.toLowerCase()] = false; });
+    canvas.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        mouseScreen.x = e.clientX - rect.left; mouseScreen.y = e.clientY - rect.top;
+    });
+    canvas.addEventListener('mousedown', (e) => { if (e.button === 0) tryShoot(); });
+
+    // --- ENTIDADES ---
+
+    const player = {
+        x: 200, y: 200, radius: 15, speed: 4, color: '#4CAF50', hasBullet: true,
+        update() {
+            if (gameState.gameOver) return;
+            let dx = 0, dy = 0;
+            if (keys.w) dy -= this.speed; if (keys.s) dy += this.speed;
+            if (keys.a) dx -= this.speed; if (keys.d) dx += this.speed;
+            if (dx !== 0 && dy !== 0) { const f = 1 / Math.sqrt(2); dx *= f; dy *= f; }
+            if (!checkWallCollision(this.x + dx, this.y, this.radius)) this.x += dx;
+            if (!checkWallCollision(this.x, this.y + dy, this.radius)) this.y += dy;
+            this.x = Math.max(this.radius, Math.min(WORLD_WIDTH - this.radius, this.x));
+            this.y = Math.max(this.radius, Math.min(WORLD_HEIGHT - this.radius, this.y));
+            mouseWorld.x = mouseScreen.x + camera.x; mouseWorld.y = mouseScreen.y + camera.y;
+        },
+        draw() {
+            ctx.save(); ctx.translate(this.x, this.y);
+            ctx.beginPath(); ctx.arc(0, 0, this.radius, 0, Math.PI * 2); ctx.fillStyle = this.color; ctx.fill();
+            ctx.strokeStyle = '#2E7D32'; ctx.lineWidth = 2; ctx.stroke();
+            const angle = Math.atan2(mouseWorld.y - this.y, mouseWorld.x - this.x);
+            ctx.rotate(angle); ctx.fillStyle = '#111'; ctx.fillRect(0, -4, 28, 8);
+            ctx.restore();
+            if (this.hasBullet) {
+                ctx.beginPath(); ctx.arc(this.x, this.y - 25, 4, 0, Math.PI * 2); ctx.fillStyle = '#FFEB3B'; ctx.fill();
+            }
+        }
+    };
+
+    const playerBullet = {
+        x: 0, y: 0, radius: 5, speed: 12, dx: 0, dy: 0, active: false, isMoving: false, cooldown: 0, bounceCount: 0, maxBounces: 3,
+        fire(sx, sy, tx, ty) {
+            this.x = sx; this.y = sy; this.active = true; this.isMoving = true; this.cooldown = 15; this.bounceCount = 0;
+            const angle = Math.atan2(ty - sy, tx - sx);
+            this.dx = Math.cos(angle) * this.speed; this.dy = Math.sin(angle) * this.speed;
+            updateStatus("BALA EN EL AIRE", "#E65100");
+        },
+        stop() { this.dx = 0; this.dy = 0; this.isMoving = false; },
+        update() {
+            if (!this.active) return;
+            if (this.cooldown > 0) this.cooldown--;
+            if (this.cooldown === 0 && Math.hypot(this.x - player.x, this.y - player.y) < player.radius + this.radius + 10) {
+                this.active = false; player.hasBullet = true; updateStatus("LISTO", "#4CAF50"); return;
+            }
+            if (!this.isMoving) return;
+            let nextX = this.x + this.dx; let nextY = this.y + this.dy; let bounced = false;
+            if (checkWallCollision(nextX, this.y, this.radius)) { this.dx *= -1; bounced = true; } else { this.x += this.dx; }
+            if (checkWallCollision(this.x, nextY, this.radius)) { this.dy *= -1; bounced = true; } else { this.y += this.dy; }
+            if (this.x < 0 || this.x > WORLD_WIDTH) { this.dx *= -1; bounced = true; }
+            if (this.y < 0 || this.y > WORLD_HEIGHT) { this.dy *= -1; bounced = true; }
+            if (bounced) { this.bounceCount++; if (this.bounceCount >= this.maxBounces) this.stop(); }
+        },
+        draw() {
+            if (!this.active) return;
+            ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.fillStyle = this.isMoving ? '#FFEB3B' : '#9E9E9E'; ctx.fill();
+            if (this.isMoving) { ctx.shadowBlur = 10; ctx.shadowColor = '#FFEB3B'; } ctx.shadowBlur = 0;
+        }
+    };
+
+    let enemyBullets = [];
+    class EnemyBullet {
+        // Aceptamos un multiplicador de velocidad opcional (speedMult)
+        constructor(x, y, angle, speedMult = 1.0) {
+            this.x = x; this.y = y;
+            this.speed = 7 * speedMult;
+            this.radius = 4;
+            this.dx = Math.cos(angle) * this.speed;
+            this.dy = Math.sin(angle) * this.speed;
+            this.del = false;
+            // Balas de escopeta (más lentas) son un poco más pequeñas
+            if (speedMult < 1.0) this.radius = 3.5;
+        }
+        update() {
+            this.x += this.dx; this.y += this.dy;
+            if (checkWallCollision(this.x, this.y, this.radius) || this.x < 0 || this.x > WORLD_WIDTH || this.y < 0 || this.y > WORLD_HEIGHT) {
+                this.del = true;
+            }
+            if (Math.hypot(this.x - player.x, this.y - player.y) < this.radius + player.radius) {
+                triggerGameOver("ELIMINADO POR DISPARO");
+            }
+        }
+        draw() {
+            ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2);
+            ctx.fillStyle = '#ff3333'; ctx.fill();
+        }
+    }
+
+    // --- NIVEL ---
+    const walls = [
+        { x: -50, y: -50, w: WORLD_WIDTH+100, h: 50 }, { x: -50, y: WORLD_HEIGHT, w: WORLD_WIDTH+100, h: 50 },
+        { x: -50, y: 0, w: 50, h: WORLD_HEIGHT }, { x: WORLD_WIDTH, y: 0, w: 50, h: WORLD_HEIGHT },
+        { x: 400, y: 100, w: 20, h: 500 }, { x: 0, y: 600, w: 300, h: 20 },
+        { x: 600, y: 200, w: 20, h: 800 }, { x: 800, y: 200, w: 20, h: 800 },
+        { x: 1000, y: 400, w: 400, h: 20 }, { x: 1400, y: 200, w: 20, h: 600 }, { x: 1200, y: 600, w: 200, h: 200 },
+        { x: 200, y: 1200, w: 1000, h: 20 }, { x: 500, y: 1400, w: 20, h: 400 }, { x: 800, y: 1400, w: 20, h: 400 },
+        { x: 1600, y: 1000, w: 20, h: 800 }, { x: 1800, y: 1200, w: 500, h: 20 }
+    ];
+
+    // DEFINICIÓN DE ENEMIGOS (Añadido 'type')
+    // Rojo = normal, Naranja = shotgun
+    let enemies = [
+        { x: 500, y: 300, w: 32, h: 32, color: '#D32F2F', type: 'normal', alive: true, cd: 0 },
+        { x: 700, y: 500, w: 32, h: 32, color: '#FF5722', type: 'shotgun', alive: true, cd: 0 }, // Escopeta
+        { x: 1200, y: 300, w: 32, h: 32, color: '#D32F2F', type: 'normal', alive: true, cd: 0 },
+        { x: 1500, y: 500, w: 32, h: 32, color: '#FF5722', type: 'shotgun', alive: true, cd: 0 }, // Escopeta
+        { x: 300, y: 1400, w: 32, h: 32, color: '#D32F2F', type: 'normal', alive: true, cd: 0 },
+        { x: 650, y: 1600, w: 32, h: 32, color: '#FF5722', type: 'shotgun', alive: true, cd: 0 }, // Escopeta
+        { x: 1100, y: 1500, w: 32, h: 32, color: '#D32F2F', type: 'normal', alive: true, cd: 0 },
+        { x: 2000, y: 1500, w: 32, h: 32, color: '#FF5722', type: 'shotgun', alive: true, cd: 0 }, // Escopeta
+        { x: 2200, y: 500, w: 32, h: 32, color: '#D32F2F', type: 'normal', alive: true, cd: 0 }
+    ];
+
+    // --- LÓGICA CORE ---
+
+    function updateStatus(text, color) { statusText.innerText = text; statusText.style.background = color; }
+    function triggerGameOver(reason) { if (gameState.gameOver) return; gameState.gameOver = true; updateStatus(reason, "#000"); }
+    function tryShoot() { if (gameState.gameOver) { resetGame(); return; } if (player.hasBullet) { player.hasBullet = false; playerBullet.fire(player.x, player.y, mouseWorld.x, mouseWorld.y); } }
+    function checkWallCollision(cx, cy, radius) {
+        for (let wall of walls) {
+            let tx = Math.max(wall.x, Math.min(cx, wall.x + wall.w)); let ty = Math.max(wall.y, Math.min(cy, wall.y + wall.h));
+            if (Math.hypot(cx - tx, cy - ty) <= radius) return true;
+        } return false;
+    }
+    function resetGame() {
+        player.x = 200; player.y = 200; player.hasBullet = true; playerBullet.active = false; enemyBullets = [];
+        enemies.forEach(e => { e.alive = true; e.cd = Math.random() * 100 + 50; });
+        gameState.gameOver = false; updateStatus("ZONA SEGURA", "#333");
+    }
+
+    function loop() {
+        if (!gameState.gameOver) {
+            player.update();
+            camera.x = Math.max(0, Math.min(player.x - canvas.width / 2, WORLD_WIDTH - canvas.width));
+            camera.y = Math.max(0, Math.min(player.y - canvas.height / 2, WORLD_HEIGHT - canvas.height));
+            playerBullet.update();
+            
+            // --- IA ENEMIGOS MEJORADA ---
+            enemies.forEach(e => {
+                if (!e.alive) return;
+                if (e.cd > 0) e.cd--;
+                const dist = Math.hypot(player.x - e.x, player.y - e.y);
+                
+                // Rango de visión aumentado a 550
+                if (dist < 550 && e.cd <= 0) {
+                    const baseAngle = Math.atan2(player.y - e.y, player.x - e.x);
+                    const centerX = e.x + 16;
+                    const centerY = e.y + 16;
+
+                    if (e.type === 'normal') {
+                        // Disparo simple de rifle
+                        enemyBullets.push(new EnemyBullet(centerX, centerY, baseAngle));
+                        e.cd = 90 + Math.random() * 60; // Recarga normal (1.5s - 2.5s)
+
+                    } else if (e.type === 'shotgun') {
+                        // Lógica de Escopeta (Dispersión)
+                        const pellets = 5; // Número de perdigones
+                        const spread = 0.4; // Ángulo total de dispersión (en radianes, aprox 23 grados)
+                        const startAngle = baseAngle - (spread / 2);
+                        const angleStep = spread / (pellets - 1);
+
+                        for (let i = 0; i < pellets; i++) {
+                            const currentAngle = startAngle + (i * angleStep);
+                            // Variación aleatoria de velocidad (entre 85% y 105% de velocidad normal)
+                            const speedVariation = 0.85 + Math.random() * 0.2; 
+                            enemyBullets.push(new EnemyBullet(centerX, centerY, currentAngle, speedVariation));
+                        }
+                        // Recarga de escopeta más lenta (2.5s - 3.5s)
+                        e.cd = 150 + Math.random() * 60; 
+                    }
+                }
+            });
+
+            enemyBullets.forEach(b => b.update());
+            enemyBullets = enemyBullets.filter(b => !b.del);
+
+            if (playerBullet.active && playerBullet.isMoving) {
+                enemies.forEach(e => {
+                    if (!e.alive) return;
+                    let tx = Math.max(e.x, Math.min(playerBullet.x, e.x + e.w)); let ty = Math.max(e.y, Math.min(playerBullet.y, e.y + e.h));
+                    if (Math.hypot(playerBullet.x - tx, playerBullet.y - ty) <= playerBullet.radius) {
+                        e.alive = false; playerBullet.stop(); playerBullet.x = e.x + 16; playerBullet.y = e.y + 16;
+                    }
+                });
+            }
+            enemies.forEach(e => {
+                if (!e.alive) return;
+                let tx = Math.max(e.x, Math.min(player.x, e.x + e.w)); let ty = Math.max(e.y, Math.min(player.y, e.y + e.h));
+                if (Math.hypot(player.x - tx, player.y - ty) <= player.radius) triggerGameOver("CONTACTO FÍSICO");
+            });
+        }
+
+        // --- DIBUJAR ---
+        ctx.fillStyle = '#0d0d0d'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.save(); ctx.translate(-camera.x, -camera.y);
+
+        ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 2; ctx.beginPath();
+        for (let x=0; x<=WORLD_WIDTH; x+=100) { ctx.moveTo(x,0); ctx.lineTo(x,WORLD_HEIGHT); }
+        for (let y=0; y<=WORLD_HEIGHT; y+=100) { ctx.moveTo(0,y); ctx.lineTo(WORLD_WIDTH,y); } ctx.stroke();
+
+        ctx.fillStyle = '#444'; ctx.strokeStyle = '#555'; ctx.lineWidth = 1;
+        for (let w of walls) { ctx.fillRect(w.x, w.y, w.w, w.h); ctx.strokeRect(w.x, w.y, w.w, w.h); }
+
+        for (let e of enemies) {
+            if (e.alive) {
+                ctx.fillStyle = e.color; ctx.fillRect(e.x, e.y, e.w, e.h);
+                ctx.fillStyle = '#000'; ctx.fillRect(e.x+8, e.y+8, 4, 4); ctx.fillRect(e.x+20, e.y+8, 4, 4);
+            }
+        }
+
+        enemyBullets.forEach(b => b.draw());
+        playerBullet.draw();
+        player.draw();
+        ctx.restore();
+
+        if (gameState.gameOver) {
+            ctx.fillStyle = 'rgba(50, 0, 0, 0.6)'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 40px Courier New'; ctx.textAlign = 'center';
+            ctx.fillText('R - MUERTO', canvas.width/2, canvas.height/2);
+            ctx.font = '20px Courier New'; ctx.fillText('Click para reiniciar', canvas.width/2, canvas.height/2 + 40);
+        }
+        requestAnimationFrame(loop);
+    }
+    resetGame(); loop();
+</script>
+</body>
+</html>
